@@ -1,0 +1,15 @@
+[project]
+name = "rappmcp"
+version = "0.1.0"
+description = "One MCP server for a whole folder of RAPP agent.py files."
+requires-python = ">=3.10"
+dependencies = ["mcp==2.3.0"]
+
+[project.scripts]
+rappmcp = "rappmcp.cli:main"
+
+[tool.setuptools]
+packages = ["rappmcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

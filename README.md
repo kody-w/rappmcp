@@ -8,7 +8,7 @@ server per tool, no config per tool.
 
 ## Set up
 
-Python 3.10 or newer, on Linux or macOS. Install it from git with pip or uv:
+Python 3.10 or newer, on Linux, macOS or Windows. Install it from git with pip or uv:
 
 ```
 pip install "git+https://github.com/kody-w/rappmcp"

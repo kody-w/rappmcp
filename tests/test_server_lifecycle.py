@@ -91,11 +91,15 @@ async def test_agent_that_starts_a_helper_answers_at_once(tmp_path):
         started = time.monotonic()
         result = await session.call_tool("Spawner", {})
         took = time.monotonic() - started
-    child = read_pid(pid_file)
+        child = read_pid(pid_file)
+        running = alive(child)  # the worker is gone; the helper the agent started is the agent's business
     try:
         assert not result.is_error, text_of(result)
         assert text_of(result) == "started" and took < 4
-        assert alive(child)  # the helper the agent started is the agent's business
+        assert running
+        if os.name != "nt":
+            # On Windows the official MCP client ends its server's whole process tree when it closes.
+            assert alive(child)
     finally:
         try:
             os.kill(child, 9)  # our own test process

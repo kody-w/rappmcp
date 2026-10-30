@@ -54,13 +54,40 @@ PACKAGE_HOME = str(pathlib.Path(__file__).resolve().parents[1])
 TIMEOUT_ENV = "RAPPMCP_CALL_TIMEOUT"
 
 
+WINDOWS = os.name == "nt"
+
+
 def _stop(proc):
     """Stop a worker and everything it started in its own session. Never touches other processes."""
     if proc.returncode is None:
+        if WINDOWS:
+            _stop_windows(proc)
+            return
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+
+
+def _stop_windows(proc):
+    """Windows: stop the worker's process tree. The worker's own job kills anything left over."""
+    import subprocess
+
+    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _isolation():
+    """POSIX: a new session per worker. Windows: a new process group (the worker adds a job)."""
+    if WINDOWS:
+        import subprocess
+
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
 async def run_worker(args, stdin_text, timeout, cwd=None):
@@ -76,6 +103,8 @@ async def run_worker(args, stdin_text, timeout, cwd=None):
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [PACKAGE_HOME, env.get("PYTHONPATH")]))
     env[TIMEOUT_ENV] = f"{timeout:g}"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if WINDOWS:  # the worker watches this server, even through a venv launcher
+        env["RAPPMCP_SERVER_PID"] = str(os.getpid())
     with tempfile.TemporaryFile() as errors:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "rappmcp.runner", *args,
@@ -84,7 +113,7 @@ async def run_worker(args, stdin_text, timeout, cwd=None):
             stderr=errors,
             cwd=cwd or PACKAGE_HOME,
             env=env,
-            start_new_session=True,
+            **_isolation(),
         )
         out = b""
 

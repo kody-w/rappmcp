@@ -3,11 +3,17 @@
 Never the real Wingman, never Grok Bot's cloud.
 """
 import json
+import sys
 import time
 
 import pytest
 
 from conftest import FIXTURES, ROOT, connect, text_of
+
+if sys.platform == "win32":
+    pytest.skip("Wingman is a macOS app, and these tests stand in for wingman-cli with a POSIX shell "
+                "script, so they do not run on Windows", allow_module_level=True)
+
 
 AGENTS = ROOT / "agents"
 FAKE = FIXTURES / "fake-wingman-cli"

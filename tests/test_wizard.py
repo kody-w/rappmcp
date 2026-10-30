@@ -9,6 +9,11 @@ import sys
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+if sys.platform == "win32":
+    pytest.skip("Wingman is a macOS app, and these tests stand in for wingman-cli with a POSIX shell "
+                "script, so they do not run on Windows", allow_module_level=True)
+
 FAKE = ROOT / "tests" / "fixtures" / "fake-wingman-cli"
 # The pinned kernel's basic_agent.py, found the same way the server finds it: the installed
 # Brainstem's copy, the cache, or a sha256-checked fetch. Works on a clean machine.

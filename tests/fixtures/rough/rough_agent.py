@@ -54,7 +54,7 @@ class Spawner(BasicAgent):
     def perform(self, **kwargs):
         import subprocess
 
-        child = subprocess.Popen(["sleep", "20"])
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
         with open(os.environ["ROUGH_PID_FILE"], "w") as f:
             f.write(str(child.pid))
         return "started"

@@ -16,7 +16,9 @@ import pytest
 from conftest import ROOT
 from rappmcp import kernel
 
-PIN = json.loads((ROOT / "kernel.json").read_text())
+# The pin ships inside the package. The root kernel.json is a link to it, which a Windows
+# checkout may turn into a plain text file, so read the real one.
+PIN = json.loads((ROOT / "rappmcp" / "kernel.json").read_text())
 FILE = PIN["files"][0]
 
 

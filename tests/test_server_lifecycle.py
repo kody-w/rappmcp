@@ -16,6 +16,8 @@ ROUGH = FIXTURES / "rough"
 
 
 def alive(pid):
+    if os.name == "nt":
+        return _alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -23,6 +25,26 @@ def alive(pid):
     # A zombie still answers kill 0; ps tells the truth.
     state = os.popen(f"ps -o stat= -p {pid}").read().strip()
     return bool(state) and not state.startswith("Z")
+
+
+def _alive_windows(pid):
+    """On Windows os.kill(pid, 0) would stop the process, so ask for its exit code instead."""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        return bool(k32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+    finally:
+        k32.CloseHandle(handle)
 
 
 def wait_dead(pid, seconds=10):
@@ -138,7 +160,8 @@ def test_worker_dies_when_its_server_is_killed(tmp_path):
         [sys.executable, "-c",
          "import subprocess,sys,time;"
          "p=subprocess.Popen([sys.executable,'-m','rappmcp.runner','call',sys.argv[1],'Sleepy'],"
-         "stdin=subprocess.PIPE,start_new_session=True);p.stdin.write(b'{}');p.stdin.close();time.sleep(60)",
+         "stdin=subprocess.PIPE,start_new_session=(sys.platform!='win32'));"
+         "p.stdin.write(b'{}');p.stdin.close();time.sleep(60)",
          str(ROUGH / "rough_agent.py")],
         env={**os.environ, "PYTHONPATH": str(ROOT), "ROUGH_PID_FILE": str(pid_file)},
     )

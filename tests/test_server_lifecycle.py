@@ -103,7 +103,7 @@ async def test_agent_that_starts_a_helper_answers_at_once(tmp_path):
     finally:
         try:
             os.kill(child, 9)  # our own test process
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):  # Windows answers PermissionError once it is gone
             pass
 
 

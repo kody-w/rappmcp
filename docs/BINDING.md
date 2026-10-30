@@ -8,17 +8,23 @@ agent.py files.
 
 | agent.py (RAPP Brainstem)        | MCP                                         |
 |----------------------------------|---------------------------------------------|
-| `name` (same as `metadata.name`) | tool `name`                                 |
+| `name` (normally the same as `metadata.name`) | tool `name`                    |
 | `metadata.description`           | tool `description`                          |
 | `metadata.parameters`            | tool `inputSchema` (default: empty object)  |
 | `perform(**arguments)`           | `tools/call`                                |
 | return value, as `str(...)`      | one `text` content block                    |
 | an exception in `perform`        | result with `isError: true`, text `Error: <message>` |
-| `system_context()`, if it returns text | server `instructions` at startup      |
-| a file added, changed or removed | `notifications/tools/list_changed`          |
+| `system_context()`, if it returns text | server `instructions`, updated on each rescan |
+| a file added, changed or removed | `notifications/tools/list_changed`, once per client |
 
 The tool comes from the kernel's own `BasicAgent.to_tool()`, so the name,
-description and schema are exactly what a Brainstem sends to its model.
+description and schema are exactly what a Brainstem sends to its model. When
+`metadata.name` and the agent's `name` differ, the agent's `name` wins, as in a
+Brainstem: it is the name the kernel sends and the name calls are routed by.
+
+A call to a tool that does not exist is a JSON-RPC error, `-32602`
+(`Unknown tool: <name>`), as MCP clients expect. An error inside `perform` is a
+tool result with `isError: true`.
 
 ## Which agents load
 
@@ -30,6 +36,8 @@ The same rules as the Brainstem's loader:
   `BasicAgent`, and its name does not start with `_`.
 - A name that is not tool-safe (`^[a-zA-Z0-9_-]+$`) or bad metadata
   quarantines that class. The rest still load.
+- A constructor that throws stops loading that file. Classes before it in
+  the file stay; later ones are not tried.
 - Two classes with one name in one file: both are quarantined. A name an
   earlier file already took: the later one is quarantined.
 - Agents import the base class as `from agents.basic_agent import BasicAgent`
@@ -44,8 +52,20 @@ Brainstem.
 
 The server never imports agent code. A short-lived worker scans the folder,
 and a fresh worker runs each `tools/call`, the way a Brainstem reloads its
-agents on every request. Each call has a timeout (60 seconds by default). A
-crash, a hang or stray printing costs that one call. The server keeps going.
+agents on every request. A crash, a hang or stray printing costs that one
+call. The server keeps going.
+
+- Each call has a timeout, 120 seconds by default (`--timeout`). The worker
+  reads it as `RAPPMCP_CALL_TIMEOUT`, so a slow agent can answer before it.
+- A call ends when its worker exits. A helper the agent starts in the
+  background keeps running; it is the agent's business.
+- A timeout, a cancel from the client, a disconnect, or a killed server stops
+  the worker and everything it started.
+- A stopped call never claims nothing happened. The agent may have done part
+  of its work (a message may already be sent), so the result says to check
+  before trying again.
+- The worker runs from RAPPMCP's own folder. A helper file in the served
+  folder (a `json.py`) can never replace a module RAPPMCP imports.
 
 So an agent keeps no memory between calls. State lives on disk, or in the
 app the agent drives. A tool reloaded every call keeps its state on disk.

@@ -45,11 +45,18 @@ Any MCP app:
 
 Options:
 
-- `--timeout 60`: seconds one call may run before it is stopped.
+- `--timeout 120`: seconds one call may run before it is stopped.
 - `--chat-url http://localhost:7071`: also offer `brainstem_chat`, which asks
   the Brainstem at that address through its own `/chat`.
 
 Try it with the two examples: `rappmcp serve examples`.
+
+## Wingman Wizard
+
+`agents/wingman_wizard_agent.py` drives the Wingman Mac app through its own
+`wingman-cli`: `rappmcp serve agents`. It never signs in, authorizes, types
+passwords or codes, or pays, and while a bot waits on you it leaves the step
+to you. The guardrails are in [docs/WINGMAN.md](docs/WINGMAN.md).
 
 ## How it works
 

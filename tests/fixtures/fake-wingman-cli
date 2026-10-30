@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""A stand-in for wingman-cli. It never talks to Wingman: it records argv and answers from a plan.
+
+FAKE_WINGMAN_LOG   file that gets one JSON line (the argv) per call
+FAKE_WINGMAN_PLAN  JSON file: {"<key>": {"exit": 0, "stdout": "...", "stderr": "...", "sleep": 0}}
+Keys: "computer:<action>" for computer; "read:json:<bot>", then "read:json", for read --json;
+"bots:json", then "bots", for bots --json; else the command name.
+"""
+import json
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+with open(os.environ["FAKE_WINGMAN_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\n")
+plan = {}
+if os.environ.get("FAKE_WINGMAN_PLAN"):
+    with open(os.environ["FAKE_WINGMAN_PLAN"]) as f:
+        plan = json.load(f)
+words = [a for a in args if not a.startswith("--")]
+command = words[0] if words else ""
+keys = [command]
+if command == "computer" and len(words) >= 3:
+    keys = ["computer:" + words[2]]
+elif command == "read" and "--json" in args:
+    keys = ["read:json:" + words[-1], "read:json"]
+elif command == "bots" and "--json" in args:
+    keys = ["bots:json", "bots"]
+step = next((plan[k] for k in keys if k in plan), {})
+if step.get("sleep"):
+    time.sleep(step["sleep"])
+if step.get("stdout"):
+    sys.stdout.write(step["stdout"] + "\n")
+if step.get("stderr"):
+    sys.stderr.write("wingman-cli: " + step["stderr"] + "\n")
+sys.exit(step.get("exit", 0))

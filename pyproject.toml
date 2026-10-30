@@ -1,9 +1,13 @@
 [project]
 name = "rappmcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "One MCP server for a whole folder of RAPP agent.py files."
 requires-python = ">=3.10"
-dependencies = ["mcp==2.3.0"]
+dependencies = [
+    "mcp==2.3.0",
+    # The one engine. RAPPMCP is a distro on it; pinned to one merged commit.
+    "brainstem-mcp @ git+https://github.com/kody-w/brainstem-mcp@93d556c027d1f1835df15f0fad62f38fd45aa4e7",
+]
 
 [project.scripts]
 rappmcp = "rappmcp.cli:main"

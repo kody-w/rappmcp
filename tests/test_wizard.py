@@ -10,9 +10,11 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FAKE = ROOT / "tests" / "fixtures" / "fake-wingman-cli"
-KERNEL_AGENTS = pathlib.Path.home() / ".brainstem" / "src" / "rapp_brainstem" / "agents"
-if str(KERNEL_AGENTS) not in sys.path:  # the kernel's basic_agent.py, read-only, for tests only
-    sys.path.insert(0, str(KERNEL_AGENTS))
+# The pinned kernel's basic_agent.py, found the same way the server finds it: the installed
+# Brainstem's copy, the cache, or a sha256-checked fetch. Works on a clean machine.
+from rappmcp import kernel as _kernel  # noqa: E402
+
+_kernel.install()
 
 spec = importlib.util.spec_from_file_location("wingman_wizard_agent", ROOT / "agents" / "wingman_wizard_agent.py")
 wiz = importlib.util.module_from_spec(spec)

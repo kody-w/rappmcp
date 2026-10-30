@@ -7,7 +7,6 @@ Brainstem: `from agents.basic_agent import BasicAgent` or
 `from openrappter.agents.basic_agent import BasicAgent`.
 """
 import hashlib
-import importlib.util
 import json
 import os
 import pathlib
@@ -15,11 +14,19 @@ import sys
 import types
 import urllib.request
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-PIN = json.loads((ROOT / "kernel.json").read_text())
+# kernel.json ships inside the package, so a pip or uvx install from git has it too.
+# The repo root keeps a link to it under the same name.
+PIN = json.loads((pathlib.Path(__file__).resolve().parent / "kernel.json").read_text())
 BASE = next(f for f in PIN["files"] if f["path"].endswith("agents/basic_agent.py"))
 INSTALLED = pathlib.Path(os.path.expanduser(PIN["installed"]["path"]))
-CACHE = pathlib.Path(os.path.expanduser("~/.cache/rappmcp/kernel")) / PIN["commit"]
+
+
+def cache_dir():
+    """Where a fetched kernel file is kept: $RAPPMCP_CACHE, else $XDG_CACHE_HOME/rappmcp, else ~/.cache/rappmcp."""
+    base = os.environ.get("RAPPMCP_CACHE") or os.path.join(
+        os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "rappmcp"
+    )
+    return pathlib.Path(base) / "kernel" / PIN["commit"]
 
 
 class KernelError(RuntimeError):
@@ -36,7 +43,7 @@ def pinned_url():
 
 
 def _fetch_pinned():
-    target = CACHE / "basic_agent.py"
+    target = cache_dir() / "basic_agent.py"
     if target.exists() and sha256(target) == BASE["sha256"]:
         return target
     with urllib.request.urlopen(pinned_url(), timeout=20) as reply:
@@ -44,12 +51,19 @@ def _fetch_pinned():
     if hashlib.sha256(data).hexdigest() != BASE["sha256"]:
         raise KernelError("The kernel file from GitHub does not match kernel.json. Nothing was loaded.")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
+    # Several workers may fetch at once: write a private file, then swap it in whole.
+    part = target.with_name(f".{target.name}.{os.getpid()}.part")
+    part.write_bytes(data)
+    os.replace(part, target)
     return target
 
 
 def locate():
-    """Return the path of a basic_agent.py whose bytes match the pin."""
+    """Return the path of a basic_agent.py whose bytes match the pin.
+
+    In order: $RAPPMCP_KERNEL (set by --kernel), the installed Brainstem's copy,
+    the cached copy, then a fresh fetch from GitHub at the pinned commit.
+    """
     override = os.environ.get("RAPPMCP_KERNEL")
     if override:
         path = pathlib.Path(os.path.expanduser(override))
@@ -79,9 +93,15 @@ def install(agent_dir=None):
     global _installed_class
     if _installed_class is None:
         path = locate()
-        spec = importlib.util.spec_from_file_location("agents.basic_agent", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Run it from the bytes just read, and never through the import system: that way
+        # nothing (no __pycache__, no .pyc) is ever written into the kernel install.
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != BASE["sha256"] and not os.environ.get("RAPPMCP_KERNEL"):
+            raise KernelError(f"{path} changed after it was checked. Nothing was loaded.")
+        module = types.ModuleType("agents.basic_agent")
+        module.__file__ = str(path)
+        sys.modules["agents.basic_agent"] = module
+        exec(compile(data, str(path), "exec"), module.__dict__)
         _installed_class = module.BasicAgent
         agents_pkg = sys.modules.get("agents") or types.ModuleType("agents")
         agents_pkg.__path__ = []

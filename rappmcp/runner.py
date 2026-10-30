@@ -13,6 +13,9 @@ import sys
 import threading
 import time
 
+# Never write __pycache__ anywhere: not into the kernel install, not into the agents' folder.
+sys.dont_write_bytecode = True
+
 
 def _watch_parent():
     """Stop this worker, and whatever its agent started, if the server that started it goes away.
@@ -42,22 +45,42 @@ def _answer_channel():
 
 
 def _list(target):
+    """Scan one file or folder. The server scans one file per worker, so a file that
+    exits or hangs at import costs only its own tools."""
     from . import loader
 
     agents, where, quarantined, errors = loader.load(target)
-    tools, instructions = [], []
+    tools = []
     for name, instance in agents.items():
         tool = loader.tool_of(instance)
         tool["file"] = where[name]
-        tools.append(tool)
+        tool["class"] = type(instance).__name__
         try:
             context = instance.system_context()
         except Exception as error:
             errors.append({"file": os.path.basename(where[name]), "error": f"system_context: {error}"})
             context = None
         if isinstance(context, str) and context.strip():
-            instructions.append(context.strip())
-    return {"tools": tools, "quarantined": quarantined, "errors": errors, "instructions": instructions}
+            tool["context"] = context.strip()
+        tools.append(tool)
+    return {"tools": tools, "quarantined": quarantined, "errors": errors}
+
+
+def _structured(result):
+    """The JSON object an agent answered with, or None. The text answer stays str(result)."""
+    if isinstance(result, dict):
+        value = result
+    else:
+        try:
+            value = json.loads(str(result))
+        except ValueError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _call(path, name, args):
@@ -75,7 +98,11 @@ def _call(path, name, args):
         result = agent.perform(**args)
     except Exception as error:
         return {"ok": False, "text": f"Error: {error}"}
-    return {"ok": True, "text": str(result)}
+    reply = {"ok": True, "text": str(result)}
+    structured = _structured(result)
+    if structured is not None:
+        reply["structured"] = structured
+    return reply
 
 
 def main(argv):

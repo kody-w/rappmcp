@@ -11,5 +11,8 @@ rappmcp = "rappmcp.cli:main"
 [tool.setuptools]
 packages = ["rappmcp"]
 
+[tool.setuptools.package-data]
+rappmcp = ["kernel.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

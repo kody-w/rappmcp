@@ -4,7 +4,8 @@ Same rules as the kernel's loader:
 - a folder serves every *_agent.py in it, sorted by name (not subfolders);
 - a class loads when it is defined in that file, has perform(), is not
   BasicAgent, and its name does not start with _;
-- a bad name or bad metadata quarantines that class, the rest still load;
+- a bad name or bad metadata quarantines that class, the rest still load
+  (RAPPMCP also quarantines a name over 64 characters, the MCP host limit);
 - a constructor that throws stops loading that file (classes before it stay);
 - a duplicate name inside one file quarantines every copy; a name already
   taken by an earlier file quarantines the later one.
@@ -21,6 +22,7 @@ import re
 from . import kernel
 
 NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+MAX_NAME = 64  # MCP hosts and model tool APIs refuse longer tool names
 
 
 def agent_files(target):
@@ -87,6 +89,8 @@ def problem_with(instance):
         return "name is missing or not a non-empty string"
     if not NAME_RE.match(name):
         return f"name {name!r} is not tool-safe (must match ^[a-zA-Z0-9_-]+$)"
+    if len(name) > MAX_NAME:
+        return f"name {name!r} is {len(name)} characters; MCP hosts allow at most {MAX_NAME}"
     metadata = getattr(instance, "metadata", None)
     if not isinstance(metadata, dict):
         return "metadata is not a dict"
@@ -165,11 +169,46 @@ def load(target):
     return agents, where, quarantined, errors
 
 
+def merge(scans):
+    """Join per-file scans, in file order, the way load() joins files.
+
+    Each scan is a runner reply for one file. A name an earlier file already took
+    quarantines the later one, as in a Brainstem.
+    """
+    tools, quarantined, errors, instructions, taken = [], [], [], [], set()
+    for scan in scans:
+        quarantined.extend(scan.get("quarantined", []))
+        errors.extend(scan.get("errors", []))
+        for tool in scan.get("tools", []):
+            tool = dict(tool)
+            cls, context = tool.pop("class", ""), tool.pop("context", None)
+            if tool["name"] in taken:
+                quarantined.append({
+                    "file": pathlib.Path(tool["file"]).name,
+                    "class": cls,
+                    "reason": f"duplicate agent name {tool['name']!r}; already registered by an earlier file",
+                })
+                continue
+            taken.add(tool["name"])
+            tools.append(tool)
+            if context:
+                instructions.append(context)
+    return {"tools": tools, "quarantined": quarantined, "errors": errors, "instructions": instructions}
+
+
+def read_only(instance):
+    """True when the agent says it only reads: metadata['read_only'] or a read_only attribute set to True."""
+    metadata = getattr(instance, "metadata", None) or {}
+    return metadata.get("read_only") is True or getattr(instance, "read_only", None) is True
+
+
 def tool_of(instance):
     """MCP tool for one agent, built from the kernel's own to_tool()."""
     fn = instance.to_tool()["function"]
-    return {
-        "name": fn["name"],
-        "description": fn.get("description", ""),
-        "inputSchema": fn.get("parameters") or {"type": "object", "properties": {}},
-    }
+    schema = fn.get("parameters") or {"type": "object", "properties": {}}
+    if schema.get("type") != "object":  # MCP needs an object at the root; load() already quarantines others
+        schema = {"type": "object", "properties": {"value": schema}}
+    tool = {"name": fn["name"], "description": fn.get("description", ""), "inputSchema": schema}
+    if read_only(instance):
+        tool["annotations"] = {"readOnlyHint": True, "destructiveHint": False}
+    return tool

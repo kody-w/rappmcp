@@ -18,8 +18,10 @@ def anyio_backend():
 
 
 @asynccontextmanager
-async def connect(path, *flags, env=None, on_message=None):
-    """Start the real rappmcp server over stdio with the official MCP client."""
+async def connect(path, *flags, env=None, on_message=None, errlog=None):
+    """Start the real rappmcp server over stdio with the official MCP client.
+
+    Pass an open file as errlog to keep the server's log lines."""
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "rappmcp", "serve", str(path), *flags],
@@ -28,7 +30,7 @@ async def connect(path, *flags, env=None, on_message=None):
     )
     kwargs = {"message_handler": on_message} if on_message else {}
     with open(os.devnull, "w") as quiet:
-        async with stdio_client(params, errlog=quiet) as (read, write):
+        async with stdio_client(params, errlog=errlog or quiet) as (read, write):
             async with ClientSession(read, write, **kwargs) as session:
                 init = await session.initialize()
                 yield session, init

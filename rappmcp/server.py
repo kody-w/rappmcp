@@ -1,8 +1,8 @@
 """One MCP server for a whole folder of agent.py files.
 
-The server never imports agent code. It asks a short-lived worker
-(rappmcp.runner) to scan the folder and to run each call, with a timeout. A
-crashing or hanging agent costs one worker, never the server.
+The server never imports agent code. Short-lived workers (rappmcp.runner) scan
+the folder, one file per worker, and a fresh worker runs each call, each with
+a timeout. A crashing or hanging agent costs one worker, never the server.
 """
 import asyncio
 import json
@@ -21,10 +21,15 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.exceptions import MCPError
 from mcp.server.subscriptions import InMemorySubscriptionBus, ListenHandler, ToolsListChanged
 
-from . import __version__
+from . import __version__, kernel, loader
 
 CHAT_TOOL = "brainstem_chat"
-SCAN_TIMEOUT = 30.0
+SCAN_TIMEOUT = 10.0  # seconds one file may take to import; well under a client's startup wait
+STARTUP_WAIT = 2.0  # how long initialize waits for the first scan, so instructions can ride along
+SCAN_WORKERS = max(1, min(8, os.cpu_count() or 1))
+
+# RAPPMCP only reads the kernel install. Neither the server nor any worker writes bytecode.
+sys.dont_write_bytecode = True
 
 
 def _log(message):
@@ -70,6 +75,7 @@ async def run_worker(args, stdin_text, timeout, cwd=None):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [PACKAGE_HOME, env.get("PYTHONPATH")]))
     env[TIMEOUT_ENV] = f"{timeout:g}"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     with tempfile.TemporaryFile() as errors:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "rappmcp.runner", *args,
@@ -141,8 +147,20 @@ CHAT_TOOL_DEF = {
 }
 
 
+def _tool(t):
+    hints = t.get("annotations")
+    return types.Tool(
+        name=t["name"],
+        description=t["description"],
+        input_schema=t["inputSchema"],
+        annotations=types.ToolAnnotations(
+            read_only_hint=hints.get("readOnlyHint"), destructive_hint=hints.get("destructiveHint")
+        ) if hints else None,
+    )
+
+
 class Rappmcp:
-    def __init__(self, target, timeout=120.0, chat_url=None, poll=1.0):
+    def __init__(self, target, timeout=120.0, chat_url=None, poll=1.0, scan_timeout=SCAN_TIMEOUT):
         self.target = pathlib.Path(target).expanduser().resolve()
         if not self.target.exists():
             raise FileNotFoundError(f"{self.target} does not exist")
@@ -150,6 +168,8 @@ class Rappmcp:
         self.timeout = timeout
         self.chat_url = chat_url
         self.poll = poll
+        self.scan_timeout = scan_timeout
+        self.ready = asyncio.Event()  # set once the first scan is done
         self.tools = []
         self.report = {}
         self.mark = None
@@ -158,30 +178,53 @@ class Rappmcp:
         self.options = None
         self.bus = InMemorySubscriptionBus()
 
+    async def scan_file(self, path, limit):
+        """Scan one agent file in its own worker. A file that exits or hangs loses only its own tools."""
+        async with limit:
+            reply, note = await run_worker(["list", str(path)], "", self.scan_timeout)
+        if reply is not None and "tools" in reply:
+            return reply
+        if note.startswith("did not finish"):
+            reason = f"skipped {path.name}: it did not finish loading within {self.scan_timeout:g} seconds (--scan-timeout)"
+        else:
+            reason = f"skipped {path.name}: {note or (reply or {}).get('text', 'scan failed')}"
+        return {"tools": [], "quarantined": [], "errors": [{"file": path.name, "error": reason}]}
+
     async def scan(self):
         self.mark = fingerprint(self.target)
-        reply, note = await run_worker(["list", str(self.target)], "", SCAN_TIMEOUT)
-        if reply is None or "tools" not in reply:
-            reason = note or (reply or {}).get("text", "scan failed")
-            _log(f"could not read the agents: {reason}")
-            reply = {"tools": [], "quarantined": [], "errors": [{"file": str(self.target), "error": reason}], "instructions": []}
+        try:
+            files = loader.agent_files(self.target)
+        except FileNotFoundError as error:
+            files = []
+            _log(str(error))
+        limit = asyncio.Semaphore(SCAN_WORKERS)
+        scans = await asyncio.gather(*(self.scan_file(path, limit) for path in files))
+        reply = loader.merge(scans)
         self.tools = reply["tools"]
         self.report = reply
         for item in reply["quarantined"]:
             _log(f"quarantined {item['class']} in {item['file']}: {item['reason']}")
         for item in reply["errors"]:
-            _log(f"could not load {item['file']}: {item['error']}")
+            text = item["error"]
+            _log(text if text.startswith("skipped ") else f"could not load {item['file']}: {text}")
         _log(f"{len(self.tools)} tool(s) from {self.target}")
+        if self.server is not None:
+            self.server.instructions = self.instructions()
+        if self.options is not None:
+            self.options.instructions = self.instructions()
         return self.tools
+
+    async def first_scan(self):
+        try:
+            await self.scan()
+        finally:
+            self.ready.set()
 
     def instructions(self):
         return "\n\n".join(self.report.get("instructions", [])) or None
 
     def listed(self):
-        tools = [
-            types.Tool(name=t["name"], description=t["description"], input_schema=t["inputSchema"])
-            for t in self.tools
-        ]
+        tools = [_tool(t) for t in self.tools]
         if self.chat_url:
             tools.append(types.Tool(name=CHAT_TOOL, description=CHAT_TOOL_DEF["description"], input_schema=CHAT_TOOL_DEF["inputSchema"]))
         return tools
@@ -192,9 +235,10 @@ class Rappmcp:
                 text = await asyncio.to_thread(
                     forward_chat, self.chat_url, (arguments or {}).get("user_input", ""), (arguments or {}).get("session_id")
                 )
-                return False, text
+                return False, text, None
             except Exception as error:
-                return True, f"The Brainstem at {self.chat_url} did not answer: {error}"
+                return True, f"The Brainstem at {self.chat_url} did not answer: {error}", None
+        await self.ready.wait()
         tool = next((t for t in self.tools if t["name"] == name), None)
         if tool is None:
             # MCP: an unknown tool is a protocol error (-32602), not a tool result.
@@ -203,8 +247,8 @@ class Rappmcp:
         if reply is None:
             return True, (f"The agent {name} {note}. It may have done part of its work before it stopped "
                           "(a message may already be sent). Check before you try again, and do not repeat "
-                          "an action that changes something.")
-        return (not reply.get("ok")), reply.get("text", "")
+                          "an action that changes something."), None
+        return (not reply.get("ok")), reply.get("text", ""), reply.get("structured")
 
     def remember(self, ctx):
         """Keep one entry per client connection. Request contexts are new every time; the
@@ -216,10 +260,6 @@ class Rappmcp:
 
     async def rescan(self):
         await self.scan()
-        if self.server is not None:
-            self.server.instructions = self.instructions()
-        if self.options is not None:
-            self.options.instructions = self.instructions()
         await self.bus.publish(ToolsListChanged())
         for connection in list(self.connections):
             try:
@@ -229,6 +269,7 @@ class Rappmcp:
                 self.connections.remove(connection)
 
     async def watch(self):
+        await self.ready.wait()
         while True:
             await anyio.sleep(self.poll)
             if fingerprint(self.target) != self.mark:
@@ -237,12 +278,15 @@ class Rappmcp:
     def build(self):
         async def on_list_tools(ctx, params):
             self.remember(ctx)
+            await self.ready.wait()  # the first scan; each file has --scan-timeout at most
             return types.ListToolsResult(tools=self.listed())
 
         async def on_call_tool(ctx, params):
             self.remember(ctx)
-            failed, text = await self.call(params.name, params.arguments)
-            return types.CallToolResult(content=[types.TextContent(text=text)], is_error=failed)
+            failed, text, structured = await self.call(params.name, params.arguments)
+            return types.CallToolResult(
+                content=[types.TextContent(text=text)], structured_content=structured, is_error=failed
+            )
 
         async def on_initialized(ctx, params):
             self.remember(ctx)
@@ -259,13 +303,35 @@ class Rappmcp:
         return self.server
 
 
-async def serve_stdio(target, timeout=120.0, chat_url=None, poll=1.0):
-    app = Rappmcp(target, timeout=timeout, chat_url=chat_url, poll=poll)
-    await app.scan()
+def _warm_kernel():
+    """Find (or fetch once) the pinned kernel file before any worker needs it."""
+    try:
+        return kernel.locate()
+    except Exception as error:
+        _log(f"kernel: {error}")
+        return None
+
+
+async def serve_stdio(target, timeout=120.0, chat_url=None, poll=1.0, scan_timeout=SCAN_TIMEOUT):
+    """Answer initialize at once, serve the healthy tools, and skip a file that hangs.
+
+    The first scan runs in the background. initialize waits for it at most STARTUP_WAIT
+    seconds (so instructions usually ride along); tools/list waits for it to finish,
+    which is at most --scan-timeout plus a moment.
+    """
+    app = Rappmcp(target, timeout=timeout, chat_url=chat_url, poll=poll, scan_timeout=scan_timeout)
     server = app.build()
     options = app.options = server.create_initialization_options(NotificationOptions(tools_changed=True))
     async with stdio_server() as (read, write):
         async with anyio.create_task_group() as group:
+
+            async def startup():
+                await asyncio.to_thread(_warm_kernel)
+                await app.first_scan()
+
+            group.start_soon(startup)
+            with anyio.move_on_after(min(STARTUP_WAIT, scan_timeout)):
+                await app.ready.wait()
             group.start_soon(app.watch)
             await server.run(read, write, options)
             group.cancel_scope.cancel()

@@ -6,6 +6,13 @@ MCP made every capability a server. agent.py makes every capability a file.
 One runner gives you both. Drop a file in the folder and it is a tool. No
 server per tool, no config per tool.
 
+RAPPMCP is the full RAPP ecosystem as MCP: a Brainstem distro built on
+[brainstem-mcp](https://github.com/kody-w/brainstem-mcp), the one engine. The
+grail kernel stays unchanged; brainstem-mcp wraps it in MCP; RAPPMCP adds only
+its agents. `distro.json` is the whole distro: the kernel pin plus every file in
+`agents/`, each pinned by sha256. `rappmcp serve <folder>` works as it always
+has, as a thin alias over brainstem-mcp's engine.
+
 ## Set up
 
 Python 3.10 or newer, on Linux, macOS or Windows. Install it from git with pip or uv:
@@ -126,12 +133,26 @@ after a restart of the server.
 passwords or codes, or pays, and while a bot waits on you it leaves the step
 to you. The guardrails are in [docs/WINGMAN.md](docs/WINGMAN.md).
 
+## RAPPMCP as a distro
+
+brainstem-mcp serves the distro straight from `distro.json`, next to the
+Brainstem's own `chat`, `job_status` and `capabilities`:
+
+```
+git clone https://github.com/kody-w/rappmcp
+claude mcp add rappmcp -- uvx --from git+https://github.com/kody-w/brainstem-mcp brainstem-mcp --distro /path/to/rappmcp/distro.json
+```
+
+A file whose bytes do not match its pin is refused. After you change an agent,
+run `python -m brainstem_mcp.distro pin distro.json`; a test fails until you do.
+
 ## How it works
 
 Each agent becomes a tool: its name, description and parameters come from its
 metadata, and a call runs `perform()`. Each file is scanned, and each call
 runs, in its own short-lived process with a timeout, so a broken agent cannot
-stop the server or hide the other tools. Keep state on disk. The full mapping is in [docs/BINDING.md](docs/BINDING.md).
+stop the server or hide the other tools. That engine lives in brainstem-mcp;
+RAPPMCP depends on it, pinned to one commit. Keep state on disk. The full mapping is in [docs/BINDING.md](docs/BINDING.md).
 
 RAPPMCP uses the RAPP Brainstem kernel unchanged and only reads it: it never
 writes a file (not even `__pycache__`) into a Brainstem install. `kernel.json`

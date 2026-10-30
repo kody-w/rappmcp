@@ -43,3 +43,31 @@ class Fine(BasicAgent):
 
     def perform(self, **kwargs):
         return "still here"
+
+
+class Spawner(BasicAgent):
+    """Starts a helper that outlives the call, then answers at once."""
+
+    def __init__(self):
+        super().__init__(name="Spawner", metadata=_meta("Spawner"))
+
+    def perform(self, **kwargs):
+        import subprocess
+
+        child = subprocess.Popen(["sleep", "20"])
+        with open(os.environ["ROUGH_PID_FILE"], "w") as f:
+            f.write(str(child.pid))
+        return "started"
+
+
+class Sleepy(BasicAgent):
+    """Writes its worker's pid, then sleeps long past any test."""
+
+    def __init__(self):
+        super().__init__(name="Sleepy", metadata=_meta("Sleepy"))
+
+    def perform(self, **kwargs):
+        with open(os.environ["ROUGH_PID_FILE"], "w") as f:
+            f.write(str(os.getpid()))
+        time.sleep(60)
+        return "too late"

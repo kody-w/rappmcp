@@ -35,13 +35,6 @@ async def test_system_context_becomes_server_instructions():
 
 
 @pytest.mark.anyio
-async def test_unknown_tool_is_an_error_result():
-    async with connect(EXAMPLES) as (session, _):
-        result = await session.call_tool("Nope", {})
-        assert result.is_error and "not found" in text_of(result)
-
-
-@pytest.mark.anyio
 async def test_state_lives_on_disk_across_calls(tmp_path):
     async with connect(EXAMPLES, env={"RAPPMCP_DATA_DIR": str(tmp_path)}) as (session, _):
         await session.call_tool("Notes", {"action": "add", "note": "first"})

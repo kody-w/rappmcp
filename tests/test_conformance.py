@@ -7,19 +7,20 @@ import pytest
 from conftest import EXAMPLES, FIXTURES, ROOT, connect, text_of
 from rappmcp import loader
 
-CALL_FOLDERS = [EXAMPLES, FIXTURES / "rules"]
+CALL_FOLDERS = [EXAMPLES, FIXTURES / "rules", FIXTURES / "names"]
 # agents/ is listed only: its agents may drive real apps, so this test never calls them.
 LIST_FOLDERS = CALL_FOLDERS + ([ROOT / "agents"] if any((ROOT / "agents").glob("*_agent.py")) else [])
 
 
 def sample(schema):
-    """Smallest arguments that satisfy an agent's required parameters."""
+    """Arguments for every parameter, optional ones too, each with a value that is not the usual default.
+
+    Sending only the required ones would let a server that drops optional arguments pass.
+    """
     args = {}
-    props = schema.get("properties", {})
-    for key in schema.get("required", []):
-        prop = props.get(key, {})
+    for key, prop in schema.get("properties", {}).items():
         if "enum" in prop:
-            args[key] = prop["enum"][0]
+            args[key] = prop["enum"][-1]
         else:
             args[key] = {"string": "hello", "integer": 2, "number": 1.5, "boolean": True,
                          "array": [], "object": {}}.get(prop.get("type"), "hello")
@@ -42,7 +43,8 @@ async def test_tools_list_matches_metadata(folder):
     for name, agent in agents.items():
         meta = agent.metadata
         tool = listed[name]
-        assert tool.name == meta.get("name", agent.name)
+        # The kernel's to_tool() names the tool by the agent's own name, so that wins over metadata['name'].
+        assert tool.name == agent.name == agent.to_tool()["function"]["name"]
         assert (tool.description or "") == meta.get("description", "")
         assert tool.input_schema == meta.get("parameters", {"type": "object", "properties": {}})
 
@@ -65,3 +67,16 @@ async def test_tools_call_matches_perform(folder, tmp_path, monkeypatch):
             result = await session.call_tool(name, args)
             assert bool(result.is_error) == failed, name
             assert text_of(result) == text, name
+
+
+def test_names_fixture_really_differs():
+    """The names fixture is the case where metadata['name'] and self.name differ."""
+    agent = direct(FIXTURES / "names")["Greeter"]
+    assert agent.metadata["name"] != agent.name
+
+
+@pytest.mark.anyio
+async def test_optional_arguments_reach_perform():
+    async with connect(FIXTURES / "names") as (session, _):
+        result = await session.call_tool("Greeter", {"who": "Ann", "excited": True, "times": 2, "style": "formal"})
+    assert text_of(result) == "Good day Ann! Good day Ann!"

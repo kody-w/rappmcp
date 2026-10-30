@@ -10,12 +10,15 @@ import os
 import pathlib
 import signal
 import sys
+import tempfile
 import urllib.request
 
 import anyio
 import mcp_types as types
+from mcp_types.jsonrpc import INVALID_PARAMS
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
+from mcp.shared.exceptions import MCPError
 from mcp.server.subscriptions import InMemorySubscriptionBus, ListenHandler, ToolsListChanged
 
 from . import __version__
@@ -42,28 +45,64 @@ def fingerprint(target):
     return tuple(marks)
 
 
-async def run_worker(args, stdin_text, timeout, cwd):
-    """Run `python -m rappmcp.runner <args>` and return (reply dict or None, note)."""
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(pathlib.Path(__file__).resolve().parents[1]), env.get("PYTHONPATH")]))
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "rappmcp.runner", *args,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-        env=env,
-        start_new_session=True,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(stdin_text.encode()), timeout)
-    except asyncio.TimeoutError:
+PACKAGE_HOME = str(pathlib.Path(__file__).resolve().parents[1])
+TIMEOUT_ENV = "RAPPMCP_CALL_TIMEOUT"
+
+
+def _stop(proc):
+    """Stop a worker and everything it started in its own session. Never touches other processes."""
+    if proc.returncode is None:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
-        await proc.wait()
-        return None, f"timed out after {timeout:g} seconds"
+
+
+async def run_worker(args, stdin_text, timeout, cwd=None):
+    """Run `python -m rappmcp.runner <args>` and return (reply dict or None, note).
+
+    The call is over when the worker exits, not when its pipes close: a helper the agent
+    started may keep stderr open, and that is the agent's business. The worker gets its own
+    session, so a timeout, a cancel or a disconnect stops it and whatever it started then.
+    It runs from RAPPMCP's own folder, so a file in the served folder (a json.py) can never
+    replace a module RAPPMCP itself imports.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [PACKAGE_HOME, env.get("PYTHONPATH")]))
+    env[TIMEOUT_ENV] = f"{timeout:g}"
+    with tempfile.TemporaryFile() as errors:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "rappmcp.runner", *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=errors,
+            cwd=cwd or PACKAGE_HOME,
+            env=env,
+            start_new_session=True,
+        )
+        out = b""
+
+        async def finish():
+            nonlocal out
+            try:
+                proc.stdin.write(stdin_text.encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            out = await proc.stdout.read()  # the answer channel is the worker's alone
+            await proc.wait()
+
+        try:
+            await asyncio.wait_for(finish(), timeout)
+        except asyncio.TimeoutError:
+            _stop(proc)
+            await proc.wait()
+            return None, f"did not finish within {timeout:g} seconds, so RAPPMCP stopped it"
+        finally:
+            _stop(proc)  # a cancel or a disconnect lands here too: stop it before going away
+        errors.seek(0)
+        err = errors.read()
     if err:
         _log(err.decode(errors="replace").strip()[-2000:])
     try:
@@ -103,7 +142,7 @@ CHAT_TOOL_DEF = {
 
 
 class Rappmcp:
-    def __init__(self, target, timeout=60.0, chat_url=None, poll=1.0):
+    def __init__(self, target, timeout=120.0, chat_url=None, poll=1.0):
         self.target = pathlib.Path(target).expanduser().resolve()
         if not self.target.exists():
             raise FileNotFoundError(f"{self.target} does not exist")
@@ -114,12 +153,14 @@ class Rappmcp:
         self.tools = []
         self.report = {}
         self.mark = None
-        self.sessions = []
+        self.connections = []
+        self.server = None
+        self.options = None
         self.bus = InMemorySubscriptionBus()
 
     async def scan(self):
         self.mark = fingerprint(self.target)
-        reply, note = await run_worker(["list", str(self.target)], "", SCAN_TIMEOUT, str(self.folder))
+        reply, note = await run_worker(["list", str(self.target)], "", SCAN_TIMEOUT)
         if reply is None or "tools" not in reply:
             reason = note or (reply or {}).get("text", "scan failed")
             _log(f"could not read the agents: {reason}")
@@ -156,31 +197,42 @@ class Rappmcp:
                 return True, f"The Brainstem at {self.chat_url} did not answer: {error}"
         tool = next((t for t in self.tools if t["name"] == name), None)
         if tool is None:
-            return True, f"Agent '{name}' not found."
-        reply, note = await run_worker(
-            ["call", tool["file"], name], json.dumps(arguments or {}), self.timeout, str(self.folder)
-        )
+            # MCP: an unknown tool is a protocol error (-32602), not a tool result.
+            raise MCPError(INVALID_PARAMS, f"Unknown tool: {name}")
+        reply, note = await run_worker(["call", tool["file"], name], json.dumps(arguments or {}), self.timeout)
         if reply is None:
-            return True, f"The agent {name} {note}. Nothing else was affected."
+            return True, (f"The agent {name} {note}. It may have done part of its work before it stopped "
+                          "(a message may already be sent). Check before you try again, and do not repeat "
+                          "an action that changes something.")
         return (not reply.get("ok")), reply.get("text", "")
 
     def remember(self, ctx):
+        """Keep one entry per client connection. Request contexts are new every time; the
+        connection behind them is not."""
         session = getattr(ctx, "session", None)
-        if session is not None and all(s is not session for s in self.sessions):
-            self.sessions.append(session)
+        connection = getattr(session, "_connection", None) or session
+        if connection is not None and all(c is not connection for c in self.connections):
+            self.connections.append(connection)
+
+    async def rescan(self):
+        await self.scan()
+        if self.server is not None:
+            self.server.instructions = self.instructions()
+        if self.options is not None:
+            self.options.instructions = self.instructions()
+        await self.bus.publish(ToolsListChanged())
+        for connection in list(self.connections):
+            try:
+                await connection.send_tool_list_changed()
+            except Exception as error:
+                _log(f"could not send tools/list_changed: {error}")
+                self.connections.remove(connection)
 
     async def watch(self):
         while True:
             await anyio.sleep(self.poll)
-            if fingerprint(self.target) == self.mark:
-                continue
-            await self.scan()
-            await self.bus.publish(ToolsListChanged())
-            for session in list(self.sessions):
-                try:
-                    await session.send_tool_list_changed()
-                except Exception as error:
-                    _log(f"could not send tools/list_changed: {error}")
+            if fingerprint(self.target) != self.mark:
+                await self.rescan()
 
     def build(self):
         async def on_list_tools(ctx, params):
@@ -192,7 +244,10 @@ class Rappmcp:
             failed, text = await self.call(params.name, params.arguments)
             return types.CallToolResult(content=[types.TextContent(text=text)], is_error=failed)
 
-        return Server(
+        async def on_initialized(ctx, params):
+            self.remember(ctx)
+
+        self.server = Server(
             "rappmcp",
             version=__version__,
             instructions=self.instructions(),
@@ -200,13 +255,15 @@ class Rappmcp:
             on_call_tool=on_call_tool,
             on_subscriptions_listen=ListenHandler(self.bus),
         )
+        self.server.add_notification_handler("notifications/initialized", types.NotificationParams, on_initialized)
+        return self.server
 
 
-async def serve_stdio(target, timeout=60.0, chat_url=None, poll=1.0):
+async def serve_stdio(target, timeout=120.0, chat_url=None, poll=1.0):
     app = Rappmcp(target, timeout=timeout, chat_url=chat_url, poll=poll)
     await app.scan()
     server = app.build()
-    options = server.create_initialization_options(NotificationOptions(tools_changed=True))
+    options = app.options = server.create_initialization_options(NotificationOptions(tools_changed=True))
     async with stdio_server() as (read, write):
         async with anyio.create_task_group() as group:
             group.start_soon(app.watch)

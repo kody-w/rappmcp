@@ -8,7 +8,30 @@ so it can never corrupt the answer.
 """
 import json
 import os
+import signal
 import sys
+import threading
+import time
+
+
+def _watch_parent():
+    """Stop this worker, and whatever its agent started, if the server that started it goes away.
+
+    The server stops its workers on a timeout, a cancel or a disconnect. This covers the rest:
+    a server killed outright. The worker runs in its own session, so this kills only that.
+    """
+    parent = os.getppid()
+
+    def watch():
+        while True:
+            time.sleep(0.5)
+            if os.getppid() != parent:
+                try:
+                    os.killpg(os.getpgrp(), signal.SIGKILL)
+                finally:
+                    os._exit(1)
+
+    threading.Thread(target=watch, name="rappmcp-parent-watch", daemon=True).start()
 
 
 def _answer_channel():
@@ -56,6 +79,8 @@ def _call(path, name, args):
 
 
 def main(argv):
+    if os.getpgrp() == os.getpid():  # only in its own session; never kill a group it does not lead
+        _watch_parent()
     out = _answer_channel()
     try:
         if len(argv) == 2 and argv[0] == "list":

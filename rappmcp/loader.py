@@ -5,6 +5,7 @@ Same rules as the kernel's loader:
 - a class loads when it is defined in that file, has perform(), is not
   BasicAgent, and its name does not start with _;
 - a bad name or bad metadata quarantines that class, the rest still load;
+- a constructor that throws stops loading that file (classes before it stay);
 - a duplicate name inside one file quarantines every copy; a name already
   taken by an earlier file quarantines the later one.
 
@@ -126,8 +127,10 @@ def load_file(path, quarantined, errors):
         try:
             instance = cls()
         except Exception as error:
+            # As the kernel does: a constructor that throws ends loading this file.
+            # Classes already loaded from it stay; later ones are not tried.
             errors.append({"file": path.name, "error": f"{attr}(): {type(error).__name__}: {error}"})
-            continue
+            break
         reason = problem_with(instance)
         if reason:
             quarantined.append({"file": path.name, "class": attr, "reason": reason})

@@ -22,7 +22,7 @@ async def test_hang_times_out_and_the_server_lives():
         started = time.monotonic()
         result = await session.call_tool("Hang", {})
         assert time.monotonic() - started < 15
-        assert result.is_error and "timed out after 2 seconds" in text_of(result)
+        assert result.is_error and "did not finish within 2 seconds" in text_of(result)
         assert text_of(await session.call_tool("Fine", {})) == "still here"
 
 

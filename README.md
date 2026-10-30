@@ -69,11 +69,15 @@ servers) to see the new tool list.
 claude mcp add rappmcp -- rappmcp serve /path/to/my-agents
 ```
 
+Tested on macOS: `claude mcp list` shows it Connected.
+
 ### Codex
 
 ```
 codex mcp add rappmcp -- rappmcp serve /path/to/my-agents
 ```
+
+Not yet tested in a Codex session. `codex mcp add` accepts this line.
 
 ### Antigravity CLI (agy)
 
